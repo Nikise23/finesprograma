@@ -163,7 +163,7 @@ model LibroMatriz {
   posicion      Int?
   apellido      String
   nombre        String
-  dni           String   @unique
+  dni           String?  @unique
   libroFolio    String?  @map("libro_folio")
   observaciones String?
   createdAt     DateTime @default(now()) @map("created_at")

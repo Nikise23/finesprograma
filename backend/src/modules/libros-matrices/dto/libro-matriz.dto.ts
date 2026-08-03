@@ -1,5 +1,5 @@
 import { PartialType } from '@nestjs/swagger';
-import { IsInt, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsInt, IsOptional, IsString, MinLength, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
@@ -20,10 +20,12 @@ export class CreateLibroMatrizDto {
   @MinLength(1)
   nombre: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
+  @ValidateIf((_, v) => v != null && String(v).trim() !== '')
   @IsString()
   @MinLength(6)
-  dni: string;
+  dni?: string | null;
 
   @ApiPropertyOptional({ example: 'L6/F32' })
   @IsOptional()

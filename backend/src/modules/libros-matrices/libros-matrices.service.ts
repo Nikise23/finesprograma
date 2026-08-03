@@ -53,11 +53,28 @@ export class LibrosMatricesService {
     return item;
   }
 
+  async nextPosicion() {
+    const agg = await this.prisma.libroMatriz.aggregate({ _max: { posicion: true } });
+    return (agg._max.posicion ?? 0) + 1;
+  }
+
   async create(dto: CreateLibroMatrizDto, userId: string) {
-    const dni = normalizeDni(dto.dni);
+    const dniNorm = dto.dni != null ? normalizeDni(String(dto.dni)) : '';
+    const dni = dniNorm.length >= 6 ? dniNorm : null;
+    const posicion =
+      dto.posicion != null && !Number.isNaN(Number(dto.posicion))
+        ? dto.posicion
+        : await this.nextPosicion();
     try {
       const item = await this.prisma.libroMatriz.create({
-        data: { ...dto, dni },
+        data: {
+          apellido: dto.apellido,
+          nombre: dto.nombre,
+          dni,
+          posicion,
+          libroFolio: dto.libroFolio,
+          observaciones: dto.observaciones,
+        },
       });
       await this.audit.log({
         usuarioId: userId,
@@ -77,12 +94,31 @@ export class LibrosMatricesService {
   async update(id: string, dto: UpdateLibroMatrizDto, userId: string) {
     await this.findOne(id);
     try {
+      const data: {
+        apellido?: string;
+        nombre?: string;
+        dni?: string | null;
+        posicion?: number;
+        libroFolio?: string;
+        observaciones?: string;
+      } = {
+        apellido: dto.apellido,
+        nombre: dto.nombre,
+        posicion: dto.posicion,
+        libroFolio: dto.libroFolio,
+        observaciones: dto.observaciones,
+      };
+      if (dto.dni !== undefined) {
+        const n = dto.dni != null ? normalizeDni(String(dto.dni)) : '';
+        data.dni = n.length >= 6 ? n : null;
+      }
+      Object.keys(data).forEach((k) => {
+        if (data[k as keyof typeof data] === undefined) delete data[k as keyof typeof data];
+      });
+
       const item = await this.prisma.libroMatriz.update({
         where: { id },
-        data: {
-          ...dto,
-          dni: dto.dni ? normalizeDni(dto.dni) : undefined,
-        },
+        data,
       });
       await this.audit.log({
         usuarioId: userId,
@@ -133,43 +169,96 @@ export class LibrosMatricesService {
         return col ? cellText(row.getCell(col).value) : '';
       };
 
-      const apellido = get('APELLIDO');
-      const nombre = get('NOMBRE');
+      const apellidoRaw = get('APELLIDO');
+      const nombreRaw = get('NOMBRE');
       const dniRaw = get('DNI');
-      const dni = normalizeDni(dniRaw);
-
-      if (!dni && !apellido && !nombre) continue;
-
-      if (!dni || dni.length < 6) {
-        errors.push({ fila: rowNum, dni: dniRaw, error: 'DNI inválido o vacío' });
-        continue;
-      }
-      if (!apellido || !nombre) {
-        errors.push({ fila: rowNum, dni, error: 'Apellido y nombre son obligatorios' });
-        continue;
-      }
-
+      const dniNorm = normalizeDni(dniRaw);
+      const observaciones = get('OBSERVACIONES') || undefined;
       const posicionStr = get('POSICIÓN') || get('POSICION');
       const posicion = posicionStr ? parseInt(posicionStr, 10) : undefined;
-      const libroFolio = get('LIBRO/FOLIO') || get('LIBRO FOLIO');
-      const observaciones = get('OBSERVACIONES') || undefined;
+      const libroFolio = get('LIBRO/FOLIO') || get('LIBRO FOLIO') || undefined;
+
+      // Fila totalmente vacía
+      if (!dniNorm && !apellidoRaw && !nombreRaw && !observaciones && !libroFolio) continue;
+
+      // DNI con basura (tiene caracteres pero < 6 dígitos)
+      if (dniRaw.trim() && dniNorm.length > 0 && dniNorm.length < 6) {
+        errors.push({
+          fila: rowNum,
+          dni: dniRaw,
+          error: `DNI con formato inválido (${apellidoRaw || '—'}, ${nombreRaw || '—'})`,
+        });
+        continue;
+      }
+
+      const dni = dniNorm.length >= 6 ? dniNorm : null;
+
+      // Sin DNI: alcanza con nombre/apellido u observación
+      if (!dni && !apellidoRaw && !nombreRaw && !observaciones) {
+        errors.push({
+          fila: rowNum,
+          error: 'Sin DNI: hace falta al menos nombre/apellido u observación',
+        });
+        continue;
+      }
+
+      const apellido = apellidoRaw || 'S/D';
+      const nombre = nombreRaw || 'S/D';
 
       try {
-        const existing = await this.prisma.libroMatriz.findUnique({ where: { dni } });
-        if (existing) {
-          await this.prisma.libroMatriz.update({
-            where: { dni },
-            data: { apellido, nombre, posicion, libroFolio, observaciones },
-          });
-          updated++;
+        if (dni) {
+          const existing = await this.prisma.libroMatriz.findUnique({ where: { dni } });
+          if (existing) {
+            await this.prisma.libroMatriz.update({
+              where: { dni },
+              data: { apellido, nombre, posicion, libroFolio, observaciones },
+            });
+            updated++;
+          } else {
+            await this.prisma.libroMatriz.create({
+              data: {
+                apellido,
+                nombre,
+                dni,
+                posicion: posicion ?? (await this.nextPosicion()),
+                libroFolio,
+                observaciones,
+              },
+            });
+            created++;
+          }
         } else {
-          await this.prisma.libroMatriz.create({
-            data: { apellido, nombre, dni, posicion, libroFolio, observaciones },
+          // Sin DNI: actualizar si ya existe mismo apellido+nombre+folio, si no crear
+          const existing = await this.prisma.libroMatriz.findFirst({
+            where: {
+              dni: null,
+              apellido: { equals: apellido, mode: 'insensitive' },
+              nombre: { equals: nombre, mode: 'insensitive' },
+              libroFolio: libroFolio ?? null,
+            },
           });
-          created++;
+          if (existing) {
+            await this.prisma.libroMatriz.update({
+              where: { id: existing.id },
+              data: { observaciones, posicion: posicion ?? existing.posicion },
+            });
+            updated++;
+          } else {
+            await this.prisma.libroMatriz.create({
+              data: {
+                apellido,
+                nombre,
+                dni: null,
+                posicion: posicion ?? (await this.nextPosicion()),
+                libroFolio,
+                observaciones,
+              },
+            });
+            created++;
+          }
         }
       } catch {
-        errors.push({ fila: rowNum, dni, error: 'Error al guardar registro' });
+        errors.push({ fila: rowNum, dni: dni ?? undefined, error: 'Error al guardar registro' });
       }
     }
 

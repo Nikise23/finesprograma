@@ -39,7 +39,7 @@ export interface LibroMatriz {
   posicion?: number;
   apellido: string;
   nombre: string;
-  dni: string;
+  dni: string | null;
   libroFolio?: string;
   observaciones?: string;
 }
@@ -365,6 +365,9 @@ export const api = {
   getLibrosMatriz: (token: string, q?: string, page = 1) =>
     authGet<Paginated<LibroMatriz>>(`/libros-matrices?q=${q ?? ''}&page=${page}&limit=50`, token),
 
+  nextLibroMatrizPosicion: (token: string) =>
+    authGet<{ posicion: number }>('/libros-matrices/next-posicion', token),
+
   importLibrosMatriz: (token: string, file: File) => {
     const fd = new FormData();
     fd.append('file', file);
@@ -381,7 +384,7 @@ export const api = {
     data: {
       apellido: string;
       nombre: string;
-      dni: string;
+      dni?: string | null;
       posicion?: number;
       libroFolio?: string;
       observaciones?: string;
@@ -394,7 +397,7 @@ export const api = {
     data: {
       apellido?: string;
       nombre?: string;
-      dni?: string;
+      dni?: string | null;
       posicion?: number;
       libroFolio?: string;
       observaciones?: string;

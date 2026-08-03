@@ -25,7 +25,7 @@ function formFromItem(item: LibroMatriz): LibroMatrizForm {
     posicion: item.posicion != null ? String(item.posicion) : '',
     apellido: item.apellido,
     nombre: item.nombre,
-    dni: item.dni,
+    dni: item.dni ?? '',
     libroFolio: item.libroFolio ?? '',
     observaciones: item.observaciones ?? '',
   };
@@ -35,14 +35,14 @@ function formToPayload(form: LibroMatrizForm) {
   const payload: {
     apellido: string;
     nombre: string;
-    dni: string;
+    dni?: string | null;
     posicion?: number;
     libroFolio?: string;
     observaciones?: string;
   } = {
     apellido: form.apellido.trim(),
     nombre: form.nombre.trim(),
-    dni: form.dni.trim(),
+    dni: form.dni.trim() ? form.dni.trim() : null,
   };
 
   if (form.posicion.trim()) {
@@ -63,6 +63,8 @@ export default function LibrosMatrizPage() {
   const [data, setData] = useState<{ items: LibroMatriz[]; total: number; pages: number } | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
   const [error, setError] = useState('');
   const [msg, setMsg] = useState('');
   const [editId, setEditId] = useState<string | null>(null);
@@ -88,26 +90,52 @@ export default function LibrosMatrizPage() {
 
   const handleImport = async (file: File) => {
     if (!token) return;
-    setLoading(true);
+    setImporting(true);
+    setImportProgress(5);
     setError('');
     setMsg('');
+    setImportResult(null);
+
+    // Avanza la barra mientras el servidor procesa (archivos grandes pueden tardar)
+    const timer = window.setInterval(() => {
+      setImportProgress((p) => {
+        if (p >= 92) return p;
+        const step = p < 40 ? 4 : p < 70 ? 2 : 0.8;
+        return Math.min(92, p + step);
+      });
+    }, 400);
+
     try {
       const result = await api.importLibrosMatriz(token, file);
+      setImportProgress(100);
       setImportResult(result);
       setPage(1);
       load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al importar');
+      setImportProgress(0);
     } finally {
-      setLoading(false);
+      window.clearInterval(timer);
+      window.setTimeout(() => {
+        setImporting(false);
+        setImportProgress(0);
+      }, 600);
     }
   };
 
-  const startCreate = () => {
+  const startCreate = async () => {
     resetForm();
     setCreating(true);
     setError('');
     setMsg('');
+    if (!token) return;
+    try {
+      const { posicion } = await api.nextLibroMatrizPosicion(token);
+      setForm({ ...EMPTY_FORM, posicion: String(posicion) });
+    } catch {
+      // Si falla el preview, el backend igual asigna la siguiente al guardar
+      setForm(EMPTY_FORM);
+    }
   };
 
   const startEdit = (item: LibroMatriz) => {
@@ -184,9 +212,9 @@ export default function LibrosMatrizPage() {
           </button>
           <input ref={fileRef} type="file" accept=".xlsx,.xls" className="hidden"
             onChange={(e) => e.target.files?.[0] && handleImport(e.target.files[0])} />
-          <button onClick={() => fileRef.current?.click()} disabled={loading}
+          <button onClick={() => fileRef.current?.click()} disabled={loading || importing}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50">
-            Importar Excel
+            {importing ? 'Importando…' : 'Importar Excel'}
           </button>
           <button onClick={() => token && api.exportLibrosMatriz(token, q)}
             className="rounded-lg border border-slate-300 px-4 py-2 text-sm hover:bg-white">
@@ -195,17 +223,41 @@ export default function LibrosMatrizPage() {
         </div>
       </div>
 
-      {importResult && (
+      {importing && (
+        <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50/60 p-4">
+          <div className="flex items-center justify-between gap-3 text-sm">
+            <p className="font-medium text-blue-900">Importando libros matriz…</p>
+            <span className="font-mono text-blue-800">{Math.round(importProgress)}%</span>
+          </div>
+          <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-blue-100">
+            <div
+              className="h-full rounded-full bg-blue-600 transition-[width] duration-300 ease-out"
+              style={{ width: `${importProgress}%` }}
+            />
+          </div>
+          <p className="mt-2 text-xs text-blue-800/80">
+            No cierres esta pestaña. Archivos grandes pueden tardar varios minutos.
+          </p>
+        </div>
+      )}
+
+      {importResult && !importing && (
         <div className="mt-4 rounded-lg border border-green-200 bg-green-50 p-4 text-sm">
           <p className="font-medium">Importación completada</p>
           <p>Creados: {importResult.created} · Actualizados: {importResult.updated} · Errores: {importResult.errors.length}</p>
           {importResult.errors.length > 0 && (
-            <ul className="mt-2 max-h-32 overflow-auto text-red-700">
-              {importResult.errors.slice(0, 10).map((e) => (
-                <li key={e.fila}>Fila {e.fila}: {e.error} {e.dni ? `(DNI ${e.dni})` : ''}</li>
-              ))}
-              {importResult.errors.length > 10 && <li>… y {importResult.errors.length - 10} más</li>}
-            </ul>
+            <>
+              <p className="mt-2 text-xs text-amber-800">
+                Revisá las filas con error. Las personas sin DNI se importan con DNI vacío (null)
+                si tienen nombre/apellido u observación.
+              </p>
+              <ul className="mt-2 max-h-40 overflow-auto text-red-700">
+                {importResult.errors.slice(0, 15).map((e) => (
+                  <li key={e.fila}>Fila {e.fila}: {e.error}{e.dni ? ` (DNI ${e.dni})` : ''}</li>
+                ))}
+                {importResult.errors.length > 15 && <li>… y {importResult.errors.length - 15} más</li>}
+              </ul>
+            </>
           )}
         </div>
       )}
@@ -222,7 +274,14 @@ export default function LibrosMatrizPage() {
                 value={form.posicion}
                 onChange={(e) => setForm({ ...form, posicion: e.target.value })}
                 className="w-full rounded border px-2 py-1.5 text-sm"
+                readOnly={creating}
+                title={creating ? 'Se asigna automáticamente (siguiente al último)' : undefined}
               />
+              {creating && (
+                <span className="mt-1 block text-xs text-slate-500">
+                  Automática: siguiente al último registro
+                </span>
+              )}
             </label>
             <label className="block text-sm">
               <span className="mb-1 block text-slate-600">Apellido *</span>
@@ -241,11 +300,12 @@ export default function LibrosMatrizPage() {
               />
             </label>
             <label className="block text-sm">
-              <span className="mb-1 block text-slate-600">DNI *</span>
+              <span className="mb-1 block text-slate-600">DNI {creating ? '(opcional)' : '*'}</span>
               <input
                 value={form.dni}
                 onChange={(e) => setForm({ ...form, dni: e.target.value })}
                 className="w-full rounded border px-2 py-1.5 text-sm font-mono"
+                placeholder="Vacío = sin documento"
               />
             </label>
             <label className="block text-sm">
@@ -305,7 +365,7 @@ export default function LibrosMatrizPage() {
                 <td className="px-3 py-2">{item.posicion ?? '—'}</td>
                 <td className="px-3 py-2">{item.apellido}</td>
                 <td className="px-3 py-2">{item.nombre}</td>
-                <td className="px-3 py-2 font-mono">{item.dni}</td>
+                <td className="px-3 py-2 font-mono">{item.dni ?? <span className="text-slate-400">null</span>}</td>
                 <td className="px-3 py-2">{item.libroFolio ?? '—'}</td>
                 <td className="px-3 py-2 text-slate-500">{item.observaciones ?? ''}</td>
                 <td className="px-3 py-2 space-x-1 whitespace-nowrap">

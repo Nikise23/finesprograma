@@ -42,6 +42,12 @@ export class LibrosMatricesController {
     return this.service.findAll(q, page, limit);
   }
 
+  @Get('next-posicion')
+  @Roles(Rol.ADMIN, Rol.ADMINISTRATIVO)
+  nextPosicion() {
+    return this.service.nextPosicion().then((posicion) => ({ posicion }));
+  }
+
   @Get('export')
   @Roles(Rol.ADMIN, Rol.ADMINISTRATIVO)
   async export(@Query('q') q: string | undefined, @Res() res: Response) {
