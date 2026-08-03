@@ -100,9 +100,24 @@ cd backend
 npm run db:seed
 ```
 
-## Notas
+## Error: DATABASE_URL must start with `postgresql://`
 
-- **No** subas `.env` ni `CREDENCIALES_DOCENTES.md` (están en `.gitignore`).
-- Uploads de planificaciones en disco free de Render **se pierden** al redeploy; para producción real usar S3/R2.
-- Blueprint opcional: `render.yaml` en la raíz (Blueprint en Render).
-- Tras cambiar `VITE_API_URL` hay que **rebuild** el static site (no alcanza con restart).
+**No es (solo) la contraseña:** Prisma no está recibiendo una URL válida.
+
+En Render → **fines-api** → **Environment**:
+
+1. Key exacta: `DATABASE_URL` (mayúsculas)
+2. Value: la **connection string completa** de Neon, por ejemplo:
+
+```text
+postgresql://neondb_owner:TU_PASSWORD@ep-xxxxx-pooler.us-west-2.aws.neon.tech/neondb?sslmode=require
+```
+
+Checklist:
+- Tiene que empezar con `postgresql://` (no pegues solo el password)
+- **Sin comillas** alrededor del valor en el panel de Render
+- Preferí el endpoint **pooler** de Neon
+- Si la password tiene caracteres especiales (`@`, `#`, `%`), Neon ya la trae URL-encoded; no la edites a mano
+- Guardá → **Manual Deploy** → Clear build cache & deploy
+
+En Neon: Dashboard → Connection Details → copiar **Connection string** (URI).
