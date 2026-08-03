@@ -1,0 +1,49 @@
+# Render Blueprint — https://render.com/docs/infrastructure-as-code
+# Repo: https://github.com/Nikise23/finesprograma
+#
+# Orden recomendado:
+# 1) Deploy API (Web Service) con DATABASE_URL de Neon
+# 2) Anotá la URL pública de la API
+# 3) Deploy frontend (Static) con VITE_API_URL=https://TU-API.onrender.com/api
+# 4) En la API, setear FRONTEND_URL=https://TU-FRONT.onrender.com
+
+services:
+  - type: web
+    name: fines-api
+    runtime: node
+    plan: free
+    rootDir: backend
+    region: oregon
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm run start:render
+    healthCheckPath: /api/docs
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 30m
+      - key: FRONTEND_URL
+        sync: false
+      - key: UPLOAD_DIR
+        value: ./uploads
+
+  - type: web
+    name: fines-web
+    runtime: static
+    plan: free
+    rootDir: frontend
+    buildCommand: npm install --include=dev && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: VITE_API_URL
+        sync: false

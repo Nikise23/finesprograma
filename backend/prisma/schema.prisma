@@ -1,0 +1,348 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Rol {
+  ADMIN
+  ADMINISTRATIVO
+  DOCENTE
+}
+
+enum EstadoEstudiante {
+  activo
+  baja_pendiente
+  inactivo
+  historico
+}
+
+enum EstadoSolicitudBaja {
+  pendiente
+  aprobada
+  rechazada
+}
+
+model Usuario {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  rol          Rol
+  activo       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  docente       Docente?
+  auditorias    Auditoria[]
+  solicitudesResueltas SolicitudBajaEstudiante[] @relation("AdminResolvio")
+
+  @@map("usuarios")
+}
+
+model Cens {
+  id        String   @id @default(uuid())
+  nombre    String
+  direccion String
+  contacto  String
+  directora String
+  activo    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sedes Sede[]
+
+  @@map("cens")
+}
+
+model Sede {
+  id        String  @id @default(uuid())
+  censId    String  @map("cens_id")
+  nombre    String
+  direccion String
+  activo    Boolean @default(true)
+
+  cens       Cens        @relation(fields: [censId], references: [id], onDelete: Cascade)
+  comisiones Comision[]
+
+  @@map("sedes")
+}
+
+model Modulo {
+  id         Int        @id
+  etiqueta   String     // 1°1C, 1°2C, 2°1C, 2°2C, 3°1C, 3°2C
+  titulo     String
+  materias   Materia[]
+  comisiones Comision[]
+
+  @@map("modulos")
+}
+
+model Materia {
+  id       String  @id @default(uuid())
+  moduloId Int     @map("modulo_id")
+  nombre   String
+  orden    Int
+  activo   Boolean @default(true)
+
+  modulo   Modulo            @relation(fields: [moduloId], references: [id], onDelete: Cascade)
+  docentes DocenteComision[]
+
+  @@unique([moduloId, nombre])
+  @@map("materias")
+}
+
+model Comision {
+  id           String  @id @default(uuid())
+  sedeId       String  @map("sede_id")
+  moduloId     Int?    @map("modulo_id")
+  numero       String
+  direccion    String
+  referente    String
+  contactos    Json
+  cicloLectivo String  @map("ciclo_lectivo")
+  cohorte      String?
+  anioCursada  String? @map("anio_cursada")
+  turno        String?
+  activo       Boolean @default(true)
+
+  sede         Sede                    @relation(fields: [sedeId], references: [id], onDelete: Cascade)
+  modulo       Modulo?                 @relation(fields: [moduloId], references: [id], onDelete: SetNull)
+  estudiantes  Estudiante[]
+  docentes     DocenteComision[]
+  notas        Nota[]
+  asistencias  Asistencia[]
+  planificaciones Planificacion[]
+  trayectorias    TrayectoriaEstudiante[]
+  notasHistoricas NotaHistorica[]
+
+  @@map("comisiones")
+}
+
+model Docente {
+  id        String  @id @default(uuid())
+  usuarioId String  @unique @map("usuario_id")
+  apellido  String
+  nombre    String
+  dni       String  @unique
+  email     String  @unique
+  telefono  String?
+  activo    Boolean @default(true)
+
+  usuario       Usuario           @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  comisiones    DocenteComision[]
+  notas         Nota[]
+  asistencias   Asistencia[]
+  planificaciones Planificacion[]
+  solicitudesBaja SolicitudBajaEstudiante[]
+
+  @@map("docentes")
+}
+
+model DocenteComision {
+  id         String  @id @default(uuid())
+  docenteId  String  @map("docente_id")
+  comisionId String  @map("comision_id")
+  materiaId  String? @map("materia_id")
+  codigo     String?
+  horario    String?
+
+  docente  Docente  @relation(fields: [docenteId], references: [id], onDelete: Cascade)
+  comision Comision @relation(fields: [comisionId], references: [id], onDelete: Cascade)
+  materia  Materia? @relation(fields: [materiaId], references: [id], onDelete: SetNull)
+
+  @@unique([docenteId, comisionId, materiaId])
+  @@unique([comisionId, materiaId])
+  @@map("docente_comision")
+}
+
+model LibroMatriz {
+  id            String   @id @default(uuid())
+  posicion      Int?
+  apellido      String
+  nombre        String
+  dni           String   @unique
+  libroFolio    String?  @map("libro_folio")
+  observaciones String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  estudiantes Estudiante[]
+
+  trayectorias TrayectoriaEstudiante[]
+
+  @@index([apellido, nombre])
+  @@map("libros_matriz")
+}
+
+model Estudiante {
+  id              String           @id @default(uuid())
+  comisionId      String?          @map("comision_id")
+  apellido        String
+  nombre          String
+  dni             String           @unique
+  fechaNacimiento DateTime?        @map("fecha_nacimiento") @db.Date
+  direccion       String?
+  telefono        String?
+  email           String?
+  libroMatrizId   String?          @map("libro_matriz_id")
+  estado          EstadoEstudiante @default(activo)
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  comision        Comision?                 @relation(fields: [comisionId], references: [id], onDelete: SetNull)
+  libroMatriz     LibroMatriz?              @relation(fields: [libroMatrizId], references: [id], onDelete: SetNull)
+  notas           Nota[]
+  asistencias     Asistencia[]
+  solicitudesBaja SolicitudBajaEstudiante[]
+
+  @@map("estudiantes")
+}
+
+model Nota {
+  id            String   @id @default(uuid())
+  estudianteId  String   @map("estudiante_id")
+  comisionId    String   @map("comision_id")
+  materia       String
+  cuatrimestre  Int
+  nota          Decimal  @db.Decimal(4, 2)
+  observaciones String?
+  docenteId     String   @map("docente_id")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  estudiante Estudiante @relation(fields: [estudianteId], references: [id], onDelete: Cascade)
+  comision   Comision   @relation(fields: [comisionId], references: [id], onDelete: Cascade)
+  docente    Docente    @relation(fields: [docenteId], references: [id], onDelete: Restrict)
+
+  @@unique([estudianteId, comisionId, materia, cuatrimestre])
+  @@map("notas")
+}
+
+model Asistencia {
+  id            String   @id @default(uuid())
+  estudianteId  String   @map("estudiante_id")
+  comisionId    String   @map("comision_id")
+  fecha         DateTime @db.Date
+  presente      Boolean
+  justificado   Boolean  @default(false)
+  observaciones String?
+  docenteId     String   @map("docente_id")
+
+  estudiante Estudiante @relation(fields: [estudianteId], references: [id], onDelete: Cascade)
+  comision   Comision   @relation(fields: [comisionId], references: [id], onDelete: Cascade)
+  docente    Docente    @relation(fields: [docenteId], references: [id], onDelete: Restrict)
+
+  @@unique([estudianteId, comisionId, fecha])
+  @@map("asistencias")
+}
+
+model Planificacion {
+  id         String   @id @default(uuid())
+  comisionId String   @map("comision_id")
+  docenteId  String   @map("docente_id")
+  nombre     String
+  archivoUrl String   @map("archivo_url")
+  tipo       String
+  uploadedAt DateTime @default(now()) @map("uploaded_at")
+
+  comision Comision @relation(fields: [comisionId], references: [id], onDelete: Cascade)
+  docente  Docente  @relation(fields: [docenteId], references: [id], onDelete: Restrict)
+
+  @@map("planificaciones")
+}
+
+model SolicitudBajaEstudiante {
+  id           String              @id @default(uuid())
+  estudianteId String              @map("estudiante_id")
+  docenteId    String              @map("docente_id")
+  motivo       String
+  estado       EstadoSolicitudBaja @default(pendiente)
+  adminId      String?             @map("admin_id")
+  createdAt    DateTime            @default(now()) @map("created_at")
+  resueltoAt   DateTime?           @map("resuelto_at")
+
+  estudiante Estudiante @relation(fields: [estudianteId], references: [id], onDelete: Cascade)
+  docente    Docente    @relation(fields: [docenteId], references: [id], onDelete: Restrict)
+  admin      Usuario?   @relation("AdminResolvio", fields: [adminId], references: [id], onDelete: SetNull)
+
+  @@map("solicitudes_baja")
+}
+
+model CicloLectivo {
+  id        String   @id @default(uuid())
+  anio      String   @unique
+  activo    Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("ciclos_lectivos")
+}
+
+model Auditoria {
+  id         String   @id @default(uuid())
+  usuarioId  String?  @map("usuario_id")
+  accion     String
+  entidad    String
+  entidadId  String?  @map("entidad_id")
+  detalle    Json?
+  ip         String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  usuario Usuario? @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
+
+  @@map("auditorias")
+}
+
+model TrayectoriaEstudiante {
+  id              String    @id @default(uuid())
+  dni             String
+  apellido        String
+  nombre          String
+  periodo         Int
+  tipo            String?
+  distrito        String?
+  comisionNumero  String    @map("comision_numero")
+  comisionId      String?   @map("comision_id")
+  fechaNacimiento DateTime? @map("fecha_nacimiento") @db.Date
+  sexo            String?
+  libroMatrizId   String?   @map("libro_matriz_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  comision    Comision?    @relation(fields: [comisionId], references: [id], onDelete: SetNull)
+  libroMatriz LibroMatriz? @relation(fields: [libroMatrizId], references: [id], onDelete: SetNull)
+
+  @@unique([dni, periodo])
+  @@index([dni])
+  @@index([apellido, nombre])
+  @@map("trayectorias_estudiantes")
+}
+
+model NotaHistorica {
+  id              String    @id @default(uuid())
+  dni             String
+  apellido        String
+  nombre          String
+  comisionNumero  String    @map("comision_numero")
+  comisionId      String?   @map("comision_id")
+  distrito        String?
+  periodoLabel    String    @map("periodo_label")
+  orientacion     String?
+  materia         String
+  nota            String?
+  libro           String?
+  folio           String?
+  estadoFinal     String?   @map("estado_final")
+  fuenteArchivo   String    @map("fuente_archivo")
+  fechaNacimiento DateTime? @map("fecha_nacimiento") @db.Date
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  comision Comision? @relation(fields: [comisionId], references: [id], onDelete: SetNull)
+
+  @@unique([dni, comisionNumero, periodoLabel, materia])
+  @@index([dni])
+  @@index([apellido, nombre])
+  @@map("notas_historicas")
+}

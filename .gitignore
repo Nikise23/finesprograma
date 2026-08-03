@@ -1,0 +1,20 @@
+# Excluido del repo
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+uploads/
+*.log
+coverage/
+.DS_Store
+CREDENCIALES_DOCENTES.md
+backups/
+*.dump
+tmp-*.json
+tmp-*.pdf
+tmp-*.mjs
+tmp-*.ts
+tmp-*.txt
+backend/.env.local.backup
