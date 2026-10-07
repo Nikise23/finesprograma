@@ -37,6 +37,17 @@ export class LibrosMatricesService {
     const [items, total] = await Promise.all([
       this.prisma.libroMatriz.findMany({
         where,
+        select: {
+          id: true,
+          posicion: true,
+          apellido: true,
+          nombre: true,
+          dni: true,
+          libroFolio: true,
+          observaciones: true,
+          createdAt: true,
+          updatedAt: true,
+        },
         orderBy: [{ apellido: 'asc' }, { nombre: 'asc' }],
         skip: (page - 1) * limit,
         take: limit,

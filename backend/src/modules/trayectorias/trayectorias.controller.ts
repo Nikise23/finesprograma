@@ -14,7 +14,8 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiProperty, ApiTags } from '@nestjs/swagger';
 import { Rol } from '@prisma/client';
-import { IsOptional, IsString, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsArray, IsOptional, IsString, MinLength, ValidateNested } from 'class-validator';
 import { memoryStorage } from 'multer';
 import { TrayectoriasService } from './trayectorias.service';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -38,6 +39,57 @@ class ImportCalificacionesTextoDto {
   @IsOptional()
   @IsString()
   nombre?: string;
+}
+
+class NotaLibroDto {
+  @ApiProperty()
+  @IsString()
+  materia!: string;
+
+  @ApiProperty({ description: '1–10 o AUS' })
+  @IsString()
+  nota!: string;
+
+  @ApiProperty({ example: '1°1C' })
+  @IsString()
+  periodoLabel!: string;
+}
+
+class ImportCalificacionesLibroDto {
+  @ApiProperty({ enum: ['viejo', 'nuevo'] })
+  @IsString()
+  plan!: 'viejo' | 'nuevo';
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  libro?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  folio?: string;
+
+  @ApiProperty({ required: false, example: '11/02/1998' })
+  @IsOptional()
+  @IsString()
+  fechaNacimiento?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  apellido?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  nombre?: string;
+
+  @ApiProperty({ type: [NotaLibroDto] })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => NotaLibroDto)
+  notas!: NotaLibroDto[];
 }
 
 @ApiTags('trayectorias')
@@ -76,6 +128,12 @@ export class TrayectoriasController {
     return this.service.importEgresadas(file.buffer, file.originalname, user.sub);
   }
 
+  @Get('plantillas-calificaciones')
+  @Roles(Rol.ADMIN, Rol.ADMINISTRATIVO, Rol.DOCENTE)
+  plantillasCalificaciones() {
+    return this.service.plantillasCalificaciones();
+  }
+
   @Post('dni/:dni/calificaciones-texto')
   @Roles(Rol.ADMIN, Rol.ADMINISTRATIVO)
   importCalificacionesTexto(
@@ -86,6 +144,56 @@ export class TrayectoriasController {
     return this.service.importCalificacionesTexto(dni, dto.texto, user.sub, {
       apellido: dto.apellido,
       nombre: dto.nombre,
+    });
+  }
+
+  @Post('dni/:dni/calificaciones-libro')
+  @Roles(Rol.ADMIN, Rol.ADMINISTRATIVO)
+  @ApiBody({ type: ImportCalificacionesLibroDto })
+  importCalificacionesLibro(
+    @Param('dni') dni: string,
+    @Body() dto: ImportCalificacionesLibroDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.service.importCalificacionesLibro(
+      dni,
+      {
+        plan: dto.plan,
+        libro: dto.libro,
+        folio: dto.folio,
+        fechaNacimiento: dto.fechaNacimiento,
+        notas: dto.notas ?? [],
+      },
+      user.sub,
+      { apellido: dto.apellido, nombre: dto.nombre },
+    );
+  }
+
+  @Post('dni/:dni/libro-matriz-foto/preview')
+  @Roles(Rol.ADMIN, Rol.ADMINISTRATIVO)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 8 * 1024 * 1024 },
+    }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
+  previewLibroMatrizFoto(
+    @Param('dni') dni: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('Imagen requerida (jpg/png/webp)');
+    }
+    return this.service.previewLibroMatrizFoto(dni, {
+      buffer: file.buffer,
+      mimetype: file.mimetype,
     });
   }
 

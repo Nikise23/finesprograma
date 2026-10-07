@@ -6,6 +6,13 @@ import {
   normalizeDni as normalizeDniShared,
   parseCalificacionesTexto,
 } from './calificaciones-texto.parser';
+import {
+  isPeriodoLabelValido,
+  normalizeNotaManual,
+  plantillasCalificacionesResponse,
+} from './plantillas-calificaciones';
+import type { PlanCalificaciones } from '../../common/constants/materias-plan-viejo';
+import { extractLibroMatrizFromImage } from './libro-matriz-vision';
 
 function normalizeUpper(text: string): string {
   return text
@@ -55,86 +62,102 @@ export class TrayectoriasService {
     private audit: AuditService,
   ) {}
 
-  private buildSearchWhere(q?: string) {
-    if (!q) return undefined;
-    const dniPart = q.replace(/\D/g, '');
-    return {
-      OR: [
-        ...(dniPart ? [{ dni: { contains: dniPart } }] : []),
-        { apellido: { contains: q, mode: 'insensitive' as const } },
-        { nombre: { contains: q, mode: 'insensitive' as const } },
-      ],
-    };
-  }
-
   async search(q?: string, page = 1, limit = 25) {
-    const where = this.buildSearchWhere(q);
+    const safeLimit = Math.min(Math.max(limit, 1), 100);
+    const safePage = Math.max(page, 1);
+    const offset = (safePage - 1) * safeLimit;
+    const qTrim = (q ?? '').trim();
+    const dniPart = qTrim.replace(/\D/g, '');
+    const like = qTrim ? `%${qTrim}%` : null;
+    const dniLike = dniPart ? `%${dniPart}%` : null;
 
-    const [trayDnis, notaDnis, estDnis] = await Promise.all([
-      this.prisma.trayectoriaEstudiante.groupBy({ by: ['dni'], where }),
-      this.prisma.notaHistorica.groupBy({ by: ['dni'], where }),
-      this.prisma.estudiante.groupBy({ by: ['dni'], where }),
-    ]);
+    // Una sola ida a Neon: página de estudiantes + conteos (antes: 3 groupBy sobre ~60k notas).
+    const rows = await this.prisma.$queryRaw<
+      {
+        dni: string;
+        apellido: string;
+        nombre: string;
+        fecha_nacimiento: Date | null;
+        estado: string;
+        comision_actual: string | null;
+        libro_folio: string | null;
+        total_periodos: number;
+        total_informes: number;
+        total: number;
+      }[]
+    >`
+      WITH filtered AS (
+        SELECT e.dni, e.apellido, e.nombre, e.fecha_nacimiento, e.estado::text AS estado, e.comision_id
+        FROM estudiantes e
+        WHERE (
+          ${like}::text IS NULL
+          OR e.apellido ILIKE ${like}
+          OR e.nombre ILIKE ${like}
+          OR (${dniLike}::text IS NOT NULL AND e.dni LIKE ${dniLike})
+        )
+      ),
+      page AS (
+        SELECT * FROM filtered
+        ORDER BY apellido ASC, nombre ASC
+        LIMIT ${safeLimit} OFFSET ${offset}
+      ),
+      tot AS (
+        SELECT COUNT(*)::int AS total FROM filtered
+      )
+      SELECT
+        p.dni,
+        p.apellido,
+        p.nombre,
+        p.fecha_nacimiento,
+        p.estado,
+        c.numero AS comision_actual,
+        l.libro_folio,
+        COALESCE(tp.c, 0)::int AS total_periodos,
+        COALESCE(ti.c, 0)::int AS total_informes,
+        (SELECT total FROM tot) AS total
+      FROM page p
+      LEFT JOIN comisiones c ON c.id = p.comision_id
+      LEFT JOIN libros_matriz l ON l.dni = p.dni
+      LEFT JOIN (
+        SELECT dni, COUNT(*)::int AS c
+        FROM trayectorias_estudiantes
+        WHERE dni IN (SELECT dni FROM page)
+        GROUP BY dni
+      ) tp ON tp.dni = p.dni
+      LEFT JOIN (
+        SELECT dni, COUNT(*)::int AS c
+        FROM (
+          SELECT DISTINCT dni, periodo_label, comision_numero
+          FROM notas_historicas
+          WHERE dni IN (SELECT dni FROM page)
+        ) x
+        GROUP BY dni
+      ) ti ON ti.dni = p.dni
+      ORDER BY p.apellido ASC, p.nombre ASC
+    `;
 
-    const dniSet = new Set([
-      ...trayDnis.map((d) => d.dni),
-      ...notaDnis.map((d) => d.dni),
-      ...estDnis.map((d) => d.dni),
-    ]);
-    const allDnis = [...dniSet].sort();
-
-    const total = allDnis.length;
-    const pageDnis = allDnis.slice((page - 1) * limit, page * limit);
-
-    const [trayectorias, notas, estudiantes, libros] = await Promise.all([
-      this.prisma.trayectoriaEstudiante.findMany({
-        where: { dni: { in: pageDnis } },
-        orderBy: [{ dni: 'asc' }, { periodo: 'asc' }],
-      }),
-      this.prisma.notaHistorica.findMany({
-        where: { dni: { in: pageDnis } },
-        select: { dni: true, periodoLabel: true, comisionNumero: true },
-      }),
-      this.prisma.estudiante.findMany({
-        where: { dni: { in: pageDnis } },
-        include: { comision: { select: { numero: true } } },
-      }),
-      this.prisma.libroMatriz.findMany({
-        where: { dni: { in: pageDnis } },
-        select: { dni: true, libroFolio: true },
-      }),
-    ]);
-
-    const items = pageDnis.map((dni) => {
-      const tray = trayectorias.filter((t) => t.dni === dni);
-      const est = estudiantes.find((e) => e.dni === dni);
-      const libro = libros.find((l) => l.dni === dni);
-      const ultima = tray[tray.length - 1];
-      const informesNotas = new Set(
-        notas.filter((n) => n.dni === dni).map((n) => `${n.periodoLabel}|${n.comisionNumero}`),
-      );
-
-      return {
-        dni,
-        apellido: ultima?.apellido ?? est?.apellido ?? '',
-        nombre: ultima?.nombre ?? est?.nombre ?? '',
-        sexo: ultima?.sexo,
-        fechaNacimiento: ultima?.fechaNacimiento ?? est?.fechaNacimiento,
-        libroMatriz: libro ? { id: dni, libroFolio: libro.libroFolio ?? undefined } : undefined,
-        periodos: tray.map((t) => ({ periodo: t.periodo, comisionNumero: t.comisionNumero })),
-        totalPeriodos: tray.length,
-        totalInformesNotas: informesNotas.size,
-        estado: est?.estado ?? (tray.length ? 'historico' : undefined),
-        comisionActual: est?.comision?.numero,
-      };
-    });
+    const total = rows[0]?.total ?? 0;
+    const items = rows.map((r) => ({
+      dni: r.dni,
+      apellido: r.apellido,
+      nombre: r.nombre,
+      fechaNacimiento: r.fecha_nacimiento,
+      libroMatriz: r.libro_folio
+        ? { id: r.dni, libroFolio: r.libro_folio }
+        : undefined,
+      periodos: [] as { periodo: number; comisionNumero: string }[],
+      totalPeriodos: r.total_periodos,
+      totalInformesNotas: r.total_informes,
+      estado: r.estado,
+      comisionActual: r.comision_actual ?? undefined,
+    }));
 
     return {
       items,
       total,
-      page,
-      limit,
-      pages: Math.ceil(total / limit) || 1,
+      page: safePage,
+      limit: safeLimit,
+      pages: Math.ceil(total / safeLimit) || 1,
     };
   }
 
@@ -152,9 +175,8 @@ export class TrayectoriasService {
       }),
       this.prisma.notaHistorica.findMany({
         where: { dni: normalized },
-        include: {
-          comision: { include: { sede: { include: { cens: true } } } },
-        },
+        // Sin include de comisión: la mayoría de históricas no tienen comisionId
+        // y el join anidado sede/cens ralentizaba la ficha.
         orderBy: [{ periodoLabel: 'asc' }, { materia: 'asc' }],
       }),
       this.prisma.estudiante.findUnique({
@@ -201,14 +223,7 @@ export class TrayectoriasService {
           distrito: n.distrito ?? undefined,
           orientacion: n.orientacion ?? undefined,
           fuenteArchivo: n.fuenteArchivo,
-          comision: n.comision
-            ? {
-                id: n.comision.id,
-                numero: n.comision.numero,
-                sede: n.comision.sede.nombre,
-                cens: n.comision.sede.cens.nombre,
-              }
-            : null,
+          comision: null,
           notas: [],
           libro: n.libro ?? undefined,
           folio: n.folio ?? undefined,
@@ -579,6 +594,203 @@ export class TrayectoriasService {
     await this.audit.log({
       usuarioId: userId,
       accion: 'IMPORT_CALIFICACIONES_TEXTO',
+      entidad: 'NotaHistorica',
+      entidadId: dni,
+      detalle: result,
+    });
+
+    return result;
+  }
+
+  plantillasCalificaciones() {
+    return plantillasCalificacionesResponse();
+  }
+
+  /**
+   * Preview OCR con Gemini. La imagen llega en memoria y no se persiste.
+   */
+  async previewLibroMatrizFoto(
+    dniParam: string,
+    file: { buffer: Buffer; mimetype: string },
+  ) {
+    const dni = normalizeDniShared(dniParam);
+    if (!dni || dni.length < 6) {
+      throw new BadRequestException('DNI inválido');
+    }
+    return extractLibroMatrizFromImage({
+      buffer: file.buffer,
+      mimeType: file.mimetype,
+      fichaDni: dni,
+    });
+  }
+
+  /**
+   * Carga manual desde foto de libro matriz (opción C):
+   * la imagen no se sube; el front envía notas + libro/folio ya tipados.
+   */
+  async importCalificacionesLibro(
+    dniParam: string,
+    body: {
+      plan: PlanCalificaciones;
+      libro?: string;
+      folio?: string;
+      fechaNacimiento?: string;
+      notas: { materia: string; nota: string; periodoLabel: string }[];
+    },
+    userId: string,
+    opts?: { apellido?: string; nombre?: string },
+  ) {
+    const dni = normalizeDniShared(dniParam);
+    if (!dni || dni.length < 6) {
+      throw new BadRequestException('DNI inválido');
+    }
+    if (body.plan !== 'viejo' && body.plan !== 'nuevo') {
+      throw new BadRequestException('plan debe ser viejo o nuevo');
+    }
+
+    const lineas = (body.notas ?? [])
+      .map((n) => {
+        const materia = (n.materia ?? '').trim().toUpperCase();
+        const periodoLabel = (n.periodoLabel ?? '').trim();
+        const nota = normalizeNotaManual(n.nota ?? '');
+        return { materia, periodoLabel, nota };
+      })
+      .filter((n) => n.materia && n.nota && n.periodoLabel);
+
+    if (!lineas.length) {
+      throw new BadRequestException('No hay notas válidas para guardar (1–10 o AUS)');
+    }
+    for (const n of lineas) {
+      if (!isPeriodoLabelValido(n.periodoLabel)) {
+        throw new BadRequestException(`periodo_label inválido: ${n.periodoLabel}`);
+      }
+    }
+
+    let estudiante = await this.prisma.estudiante.findUnique({ where: { dni } });
+    const apellido = (opts?.apellido || estudiante?.apellido || '').trim().toUpperCase();
+    const nombre = (opts?.nombre || estudiante?.nombre || '').trim().toUpperCase();
+    if (!apellido || !nombre) {
+      throw new BadRequestException('Faltan apellido y nombre en la ficha');
+    }
+
+    const fechaNacimiento =
+      parseFecha(body.fechaNacimiento ?? '') ?? estudiante?.fechaNacimiento ?? undefined;
+
+    const libro = (body.libro ?? '').trim();
+    const folio = (body.folio ?? '').trim();
+    const libroFolio =
+      libro && folio ? `${libro}/${folio}` : libro || folio || undefined;
+
+    let libroMatriz = await this.prisma.libroMatriz.findUnique({ where: { dni } });
+    let libroCreado = false;
+    let libroActualizado = false;
+
+    if (!libroMatriz && (libroFolio || apellido)) {
+      const agg = await this.prisma.libroMatriz.aggregate({ _max: { posicion: true } });
+      libroMatriz = await this.prisma.libroMatriz.create({
+        data: {
+          apellido,
+          nombre,
+          dni,
+          posicion: (agg._max.posicion ?? 0) + 1,
+          libroFolio: libroFolio ?? null,
+        },
+      });
+      libroCreado = true;
+    } else if (libroMatriz && libroFolio && libroMatriz.libroFolio !== libroFolio) {
+      libroMatriz = await this.prisma.libroMatriz.update({
+        where: { id: libroMatriz.id },
+        data: { libroFolio, apellido, nombre },
+      });
+      libroActualizado = true;
+    }
+
+    const fuenteArchivo = `carga-manual-libro-matriz-${body.plan}`;
+    const comisionNumero = 'MANUAL';
+    let notasCreated = 0;
+    let notasUpdated = 0;
+
+    for (const line of lineas) {
+      const data = {
+        dni,
+        apellido,
+        nombre,
+        comisionNumero,
+        comisionId: null as string | null,
+        periodoLabel: line.periodoLabel,
+        orientacion: 'CIENCIAS SOCIALES',
+        materia: line.materia,
+        nota: line.nota!,
+        libro: libro || undefined,
+        folio: folio || undefined,
+        fuenteArchivo,
+        fechaNacimiento: fechaNacimiento ?? undefined,
+      };
+
+      const existing = await this.prisma.notaHistorica.findUnique({
+        where: {
+          dni_comisionNumero_periodoLabel_materia: {
+            dni,
+            comisionNumero,
+            periodoLabel: line.periodoLabel,
+            materia: line.materia,
+          },
+        },
+      });
+
+      if (existing) {
+        await this.prisma.notaHistorica.update({ where: { id: existing.id }, data });
+        notasUpdated++;
+      } else {
+        await this.prisma.notaHistorica.create({ data });
+        notasCreated++;
+      }
+    }
+
+    if (!estudiante) {
+      estudiante = await this.prisma.estudiante.create({
+        data: {
+          dni,
+          apellido,
+          nombre,
+          fechaNacimiento: fechaNacimiento ?? null,
+          libroMatrizId: libroMatriz?.id,
+          estado: 'historico',
+        },
+      });
+    } else {
+      const patch: {
+        apellido: string;
+        nombre: string;
+        fechaNacimiento?: Date | null;
+        libroMatrizId?: string;
+        estado?: 'historico';
+      } = { apellido, nombre };
+      if (fechaNacimiento) patch.fechaNacimiento = fechaNacimiento;
+      if (libroMatriz && !estudiante.libroMatrizId) patch.libroMatrizId = libroMatriz.id;
+      if (estudiante.estado !== 'activo' && estudiante.estado !== 'baja_pendiente') {
+        patch.estado = 'historico';
+      }
+      await this.prisma.estudiante.update({ where: { dni }, data: patch });
+    }
+
+    const result = {
+      dni,
+      apellido,
+      nombre,
+      plan: body.plan,
+      notasCreated,
+      notasUpdated,
+      totalLineas: lineas.length,
+      periodos: [...new Set(lineas.map((l) => l.periodoLabel))],
+      libroFolio: libroMatriz?.libroFolio ?? libroFolio ?? null,
+      libroCreado,
+      libroActualizado,
+    };
+
+    await this.audit.log({
+      usuarioId: userId,
+      accion: 'IMPORT_CALIFICACIONES_LIBRO',
       entidad: 'NotaHistorica',
       entidadId: dni,
       detalle: result,

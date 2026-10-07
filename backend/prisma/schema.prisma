@@ -198,6 +198,8 @@ model Estudiante {
   asistencias     Asistencia[]
   solicitudesBaja SolicitudBajaEstudiante[]
 
+  @@index([apellido, nombre])
+  @@index([estado])
   @@map("estudiantes")
 }
 

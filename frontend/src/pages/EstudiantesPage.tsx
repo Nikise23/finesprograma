@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { api, type Comision, type Estudiante } from '../services/api';
 
 export default function EstudiantesPage() {
   const { token, user } = useAuth();
   const [q, setQ] = useState('');
+  const qDebounced = useDebouncedValue(q, 350);
   const [estudiantes, setEstudiantes] = useState<Estudiante[]>([]);
   const [comisiones, setComisiones] = useState<Comision[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -21,10 +23,10 @@ export default function EstudiantesPage() {
   const canImport = isAdmin || user?.rol === 'DOCENTE';
 
   const load = () => {
-    if (token) api.getEstudiantes(token, undefined, q || undefined).then(setEstudiantes);
+    if (token) api.getEstudiantes(token, undefined, qDebounced || undefined).then(setEstudiantes);
   };
 
-  useEffect(load, [token, q]);
+  useEffect(load, [token, qDebounced]);
   useEffect(() => {
     if (token && canImport) api.getComisiones(token).then(setComisiones);
   }, [token, canImport]);

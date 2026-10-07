@@ -1,6 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { api, type TrayectoriaDetalle, type TrayectoriaResumen } from '../services/api';
+import { compressImageForOcr } from '../utils/compressImageForOcr';
+
+type PlanTipo = 'viejo' | 'nuevo';
+type PlantillaPeriodo = { periodoLabel: string; titulo: string; materias: string[] };
+type NotaDraft = Record<string, string>; // key = `${periodoLabel}||${materia}`
+
+function splitLibroFolio(v?: string | null): { libro: string; folio: string } {
+  if (!v) return { libro: '', folio: '' };
+  const parts = v.split(/[\/\-]/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length >= 2) return { libro: parts[0], folio: parts.slice(1).join('/') };
+  return { libro: v, folio: '' };
+}
 
 function FichaDetalle({
   detalle,
@@ -24,6 +37,129 @@ function FichaDetalle({
   const [pasteMsg, setPasteMsg] = useState('');
   const [pasting, setPasting] = useState(false);
 
+  const [showLibro, setShowLibro] = useState(false);
+  const [plan, setPlan] = useState<PlanTipo>('nuevo');
+  const [plantillas, setPlantillas] = useState<{
+    viejo: PlantillaPeriodo[];
+    nuevo: PlantillaPeriodo[];
+  } | null>(null);
+  const initialLf = splitLibroFolio(detalle.libroMatriz?.libroFolio);
+  const [libro, setLibro] = useState(initialLf.libro);
+  const [folio, setFolio] = useState(initialLf.folio);
+  const [notasDraft, setNotasDraft] = useState<NotaDraft>({});
+  const [libroMsg, setLibroMsg] = useState('');
+  const [savingLibro, setSavingLibro] = useState(false);
+  const [readingGemini, setReadingGemini] = useState(false);
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!showLibro || !token || plantillas) return;
+    api.getPlantillasCalificaciones(token)
+      .then(setPlantillas)
+      .catch((e) => setLibroMsg(e instanceof Error ? e.message : 'No se pudieron cargar plantillas'));
+  }, [showLibro, token, plantillas]);
+
+  useEffect(() => {
+    return () => {
+      if (photoUrl) URL.revokeObjectURL(photoUrl);
+    };
+  }, [photoUrl]);
+
+  const periodos = useMemo(
+    () => (plantillas ? plantillas[plan] : []),
+    [plantillas, plan],
+  );
+
+  const filledCount = useMemo(
+    () => Object.values(notasDraft).filter((v) => v.trim()).length,
+    [notasDraft],
+  );
+
+  const openLibroPanel = () => {
+    setShowLibro(true);
+    setShowPaste(false);
+    setLibroMsg('');
+    const lf = splitLibroFolio(detalle.libroMatriz?.libroFolio);
+    setLibro(lf.libro);
+    setFolio(lf.folio);
+  };
+
+  const closeLibroPanel = () => {
+    setShowLibro(false);
+    if (photoUrl) {
+      URL.revokeObjectURL(photoUrl);
+      setPhotoUrl(null);
+    }
+    setPhotoFile(null);
+    if (photoInputRef.current) photoInputRef.current.value = '';
+  };
+
+  const onPhotoPick = (file: File | null) => {
+    if (photoUrl) URL.revokeObjectURL(photoUrl);
+    if (!file) {
+      setPhotoUrl(null);
+      setPhotoFile(null);
+      return;
+    }
+    if (!file.type.startsWith('image/')) {
+      setLibroMsg('Solo se aceptan imágenes (jpg, png, webp, heic…)');
+      return;
+    }
+    setPhotoFile(file);
+    setPhotoUrl(URL.createObjectURL(file));
+    setLibroMsg('');
+  };
+
+  const onDropPhoto = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0] ?? null;
+    onPhotoPick(file);
+  };
+
+  const leerConGemini = async () => {
+    if (!photoFile) {
+      setLibroMsg('Elegí una foto primero');
+      return;
+    }
+    setReadingGemini(true);
+    setLibroMsg('');
+    try {
+      const compressed = await compressImageForOcr(photoFile);
+      const r = await api.previewLibroMatrizFoto(token, detalle.dni, compressed);
+      setPlan(r.plan);
+      if (r.libro) setLibro(r.libro);
+      if (r.folio) setFolio(r.folio);
+      const draft: NotaDraft = {};
+      for (const n of r.notas) {
+        draft[`${n.periodoLabel}||${n.materia}`] = n.nota;
+      }
+      setNotasDraft(draft);
+      const warn = r.warnings?.length ? ` · ${r.warnings.join(' · ')}` : '';
+      setLibroMsg(
+        `Listo OCR (${r.model}): ${r.notas.length} nota(s) cargadas en el formulario. Revisá y guardá.${warn}`,
+      );
+    } catch (e) {
+      setLibroMsg(e instanceof Error ? e.message : 'Error al leer con Gemini');
+    } finally {
+      setReadingGemini(false);
+    }
+  };
+
+  const setNota = (periodoLabel: string, materia: string, value: string) => {
+    const key = `${periodoLabel}||${materia}`;
+    setNotasDraft((prev) => {
+      const next = { ...prev };
+      if (!value.trim()) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  };
+
   const submitPaste = async () => {
     setPasting(true);
     setPasteMsg('');
@@ -46,6 +182,41 @@ function FichaDetalle({
     }
   };
 
+  const submitLibro = async () => {
+    setSavingLibro(true);
+    setLibroMsg('');
+    try {
+      const notas = Object.entries(notasDraft)
+        .map(([key, nota]) => {
+          const [periodoLabel, materia] = key.split('||');
+          return { periodoLabel, materia, nota: nota.trim() };
+        })
+        .filter((n) => n.nota);
+      const r = await api.importCalificacionesLibro(token, detalle.dni, {
+        plan,
+        libro: libro.trim() || undefined,
+        folio: folio.trim() || undefined,
+        apellido: detalle.apellido,
+        nombre: detalle.nombre,
+        notas,
+      });
+      const libroHint = r.libroCreado
+        ? ' · libro matriz creado'
+        : r.libroActualizado
+          ? ' · libro actualizado'
+          : '';
+      setLibroMsg(
+        `Listo: ${r.notasCreated} nuevas, ${r.notasUpdated} actualizadas (${r.periodos.join(', ')})${libroHint}`,
+      );
+      setNotasDraft({});
+      onRefresh();
+    } catch (e) {
+      setLibroMsg(e instanceof Error ? e.message : 'Error al guardar');
+    } finally {
+      setSavingLibro(false);
+    }
+  };
+
   return (
     <>
       <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 lg:-mx-6 lg:-mt-6 lg:px-6">
@@ -60,13 +231,22 @@ function FichaDetalle({
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-2">
           {canEdit && (
-            <button
-              type="button"
-              onClick={() => { setShowPaste((v) => !v); setPasteMsg(''); }}
-              className="rounded border border-blue-600 px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50"
-            >
-              Pegar notas
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={openLibroPanel}
+                className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                {showLibro ? 'Ocultar carga foto' : 'Cargar foto / libro'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowPaste((v) => !v); setShowLibro(false); setPasteMsg(''); }}
+                className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50"
+              >
+                Pegar notas
+              </button>
+            </>
           )}
           <button
             onClick={() => api.exportTrayectoriaPdf(token, detalle.dni)}
@@ -82,6 +262,189 @@ function FichaDetalle({
           </button>
         </div>
       </div>
+
+      {showLibro && canEdit && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50/50 p-3 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium text-slate-800">Cargar desde libro matriz</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Arrastrá la foto o hacé clic en la zona → <strong>Leer con Gemini</strong> → revisá y guardá.
+                La imagen no queda guardada en el servidor.
+              </p>
+            </div>
+            <button type="button" onClick={closeLibroPanel} className="text-sm text-slate-500">
+              Cerrar
+            </button>
+          </div>
+
+          <div className="mt-3 grid gap-3 lg:grid-cols-2">
+            <div>
+              <input
+                ref={photoInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={(e) => {
+                  onPhotoPick(e.target.files?.[0] ?? null);
+                  e.target.value = '';
+                }}
+              />
+              <div
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    photoInputRef.current?.click();
+                  }
+                }}
+                onClick={() => photoInputRef.current?.click()}
+                onDragEnter={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
+                onDrop={onDropPhoto}
+                className={`relative flex min-h-[12rem] cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-6 text-center transition
+                  ${dragOver ? 'border-blue-600 bg-blue-100' : 'border-blue-300 bg-white hover:border-blue-500 hover:bg-blue-50/60'}`}
+              >
+                {photoUrl ? (
+                  <>
+                    <img
+                      src={photoUrl}
+                      alt="Libro matriz"
+                      className="max-h-64 w-full object-contain"
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <p className="mt-2 text-xs text-slate-600">
+                      {photoFile?.name ?? 'Foto lista'} — soltá otra para reemplazar o hacé clic
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-medium text-blue-800">Arrastrá la foto acá</p>
+                    <p className="mt-1 text-xs text-slate-500">o hacé clic para elegirla del celular/PC</p>
+                    <span className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white">
+                      Elegir imagen
+                    </span>
+                  </>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={!photoFile || readingGemini}
+                  onClick={leerConGemini}
+                  className="rounded bg-emerald-700 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+                >
+                  {readingGemini ? 'Leyendo con Gemini…' : 'Leer con Gemini'}
+                </button>
+                {photoFile && (
+                  <button
+                    type="button"
+                    onClick={() => onPhotoPick(null)}
+                    className="rounded border px-3 py-1.5 text-sm text-slate-600"
+                  >
+                    Quitar foto
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPlan('nuevo')}
+                  className={`rounded px-3 py-1.5 text-sm ${plan === 'nuevo' ? 'bg-blue-600 text-white' : 'border bg-white'}`}
+                >
+                  Plan nuevo (módulos)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPlan('viejo')}
+                  className={`rounded px-3 py-1.5 text-sm ${plan === 'viejo' ? 'bg-blue-600 text-white' : 'border bg-white'}`}
+                >
+                  Plan viejo (años)
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-slate-600">Libro</label>
+                  <input
+                    value={libro}
+                    onChange={(e) => setLibro(e.target.value)}
+                    className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm"
+                    placeholder="241"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-600">Folio</label>
+                  <input
+                    value={folio}
+                    onChange={(e) => setFolio(e.target.value)}
+                    className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm"
+                    placeholder="12"
+                  />
+                </div>
+              </div>
+
+              {!plantillas ? (
+                <p className="text-xs text-slate-500">Cargando plantilla…</p>
+              ) : (
+                <div className="max-h-[22rem] space-y-3 overflow-y-auto pr-1">
+                  {periodos.map((p) => (
+                    <div key={p.periodoLabel} className="rounded border bg-white">
+                      <div className="border-b bg-slate-50 px-2 py-1.5 text-xs font-semibold text-slate-700">
+                        {p.periodoLabel} · {p.titulo}
+                      </div>
+                      <table className="w-full text-xs">
+                        <tbody>
+                          {p.materias.map((m) => {
+                            const key = `${p.periodoLabel}||${m}`;
+                            return (
+                              <tr key={key} className="border-t border-slate-100">
+                                <td className="px-2 py-1.5">{m}</td>
+                                <td className="w-16 px-2 py-1">
+                                  <input
+                                    value={notasDraft[key] ?? ''}
+                                    onChange={(e) => setNota(p.periodoLabel, m, e.target.value)}
+                                    className="w-full rounded border px-1.5 py-1 text-right font-mono"
+                                    placeholder="—"
+                                    inputMode="decimal"
+                                  />
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={savingLibro || filledCount === 0}
+                  onClick={submitLibro}
+                  className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+                >
+                  {savingLibro ? 'Guardando…' : `Guardar ${filledCount || ''} nota(s)`}
+                </button>
+                <span className="text-xs text-slate-500">Vacías se ignoran · AUS o 1–10</span>
+              </div>
+              {libroMsg && (
+                <p className={`text-sm ${libroMsg.startsWith('Listo') ? 'text-green-700' : 'text-red-600'}`}>
+                  {libroMsg}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {showPaste && canEdit && (
         <div className="mb-4 rounded-lg border border-blue-100 bg-blue-50/40 p-3">
@@ -214,6 +577,7 @@ function FichaDetalle({
 export default function TrayectoriasPage() {
   const { token, user } = useAuth();
   const [q, setQ] = useState('');
+  const qDebounced = useDebouncedValue(q, 350);
   const [page, setPage] = useState(1);
   const [data, setData] = useState<{
     items: TrayectoriaResumen[];
@@ -233,13 +597,13 @@ export default function TrayectoriasPage() {
     if (!token) return;
     setLoading(true);
     setError('');
-    api.searchTrayectorias(token, q, page)
+    api.searchTrayectorias(token, qDebounced, page)
       .then(setData)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, [token, q, page]);
+  useEffect(load, [token, qDebounced, page]);
 
   useEffect(() => {
     if (!detalle) return;

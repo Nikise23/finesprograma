@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { api, type ImportResult, type LibroMatriz } from '../services/api';
 
 interface LibroMatrizForm {
@@ -59,6 +60,7 @@ export default function LibrosMatrizPage() {
   const { token } = useAuth();
   const fileRef = useRef<HTMLInputElement>(null);
   const [q, setQ] = useState('');
+  const qDebounced = useDebouncedValue(q, 350);
   const [page, setPage] = useState(1);
   const [data, setData] = useState<{ items: LibroMatriz[]; total: number; pages: number } | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
@@ -74,13 +76,13 @@ export default function LibrosMatrizPage() {
   const load = () => {
     if (!token) return;
     setLoading(true);
-    api.getLibrosMatriz(token, q, page)
+    api.getLibrosMatriz(token, qDebounced, page)
       .then((r) => setData({ items: r.items, total: r.total, pages: r.pages }))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, [token, q, page]);
+  useEffect(load, [token, qDebounced, page]);
 
   const resetForm = () => {
     setEditId(null);

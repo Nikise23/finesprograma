@@ -452,6 +452,60 @@ export const api = {
       periodos: string[];
     }>(`/trayectorias/dni/${encodeURIComponent(dni)}/calificaciones-texto`, token, data),
 
+  getPlantillasCalificaciones: (token: string) =>
+    authGet<{
+      viejo: { periodoLabel: string; titulo: string; materias: string[] }[];
+      nuevo: { periodoLabel: string; titulo: string; materias: string[] }[];
+    }>('/trayectorias/plantillas-calificaciones', token),
+
+  importCalificacionesLibro: (
+    token: string,
+    dni: string,
+    data: {
+      plan: 'viejo' | 'nuevo';
+      libro?: string;
+      folio?: string;
+      fechaNacimiento?: string;
+      apellido?: string;
+      nombre?: string;
+      notas: { materia: string; nota: string; periodoLabel: string }[];
+    },
+  ) =>
+    authPost<{
+      dni: string;
+      apellido: string;
+      nombre: string;
+      plan: string;
+      notasCreated: number;
+      notasUpdated: number;
+      totalLineas: number;
+      periodos: string[];
+      libroFolio: string | null;
+      libroCreado: boolean;
+      libroActualizado: boolean;
+    }>(`/trayectorias/dni/${encodeURIComponent(dni)}/calificaciones-libro`, token, data),
+
+  previewLibroMatrizFoto: (token: string, dni: string, file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return request<{
+      plan: 'viejo' | 'nuevo';
+      dni?: string;
+      apellido?: string;
+      nombre?: string;
+      fechaNacimiento?: string;
+      libro?: string;
+      folio?: string;
+      notas: { materia: string; nota: string; periodoLabel: string }[];
+      warnings: string[];
+      model: string;
+    }>(
+      `/trayectorias/dni/${encodeURIComponent(dni)}/libro-matriz-foto/preview`,
+      { method: 'POST', body: fd },
+      token,
+    );
+  },
+
   exportTrayectoriaPdf: (token: string, dni: string) =>
     api.downloadReport(token, `/reportes/trayectoria/pdf?dni=${encodeURIComponent(dni)}`, `trayectoria-${dni}.pdf`),
 
